@@ -6,34 +6,39 @@
 #include <SPIFFS.h>
 
 // =======================================================
-// CLIENT C NODE
+// CLIENT C NODE (ระบบเดิม + เพิ่มฟังก์ชันปุ่มและ Web Config)
 // =======================================================
 
 #define RXD1 25
 #define TXD1 26
+#define BUTTON_PIN 35  // ปุ่มกดสำหรับเข้าโหมด Web Server (ต่อแบบ Active LOW)
 
 // ================== LED ==================
-
-const int LED_wifi  = 18;
-const int LED_RS    = 17;
-const int LED_power = 19;
+const int LED_wifi  = 18; // ไฟสีเหลือง (ESP-NOW Status)
+const int LED_RS    = 17; // ไฟสีเขียว (RS232 Data Traffic)
+const int LED_power = 19; // ไฟสีแดง (Power)
 
 // =====================================================
 // AP CONFIG
 // =====================================================
-
 const char* AP_SSID     = "ESP32_CONFIG_C";
 const char* AP_PASSWORD = "12345678";
 
 // =====================================================
 // GLOBAL
 // =====================================================
-
 Preferences prefs;
 WebServer   server(80);
 
 uint8_t peerMac[6];
 bool    peerReady = false;
+bool    configMode = false;
+
+int buttonState = LOW;
+int lastButtonState = LOW;
+
+unsigned long lastDebounceTime = 0;
+const unsigned long debounceDelay = 50;
 
 esp_now_peer_info_t peerInfo;
 
@@ -44,9 +49,8 @@ void Task1code(void * pvParameters);
 void Task2code(void * pvParameters);
 
 // =====================================================
-// ตรวจสอบ MAC Format
+// ตรวจสอบ MAC Format (XX:XX:XX:XX:XX:XX)
 // =====================================================
-
 bool isValidMac(String mac)
 {
     if (mac.length() != 17)
@@ -54,8 +58,7 @@ bool isValidMac(String mac)
 
     for (int i = 0; i < 17; i++)
     {
-        if (i == 2 || i == 5 || i == 8 ||
-            i == 11 || i == 14)
+        if (i == 2 || i == 5 || i == 8 || i == 11 || i == 14)
         {
             if (mac[i] != ':')
                 return false;
@@ -66,14 +69,12 @@ bool isValidMac(String mac)
                 return false;
         }
     }
-
     return true;
 }
 
 // =====================================================
 // MAC STRING -> BYTE
 // =====================================================
-
 bool macStringToBytes(String macStr, uint8_t *mac)
 {
     if (macStr.length() != 17)
@@ -99,7 +100,6 @@ bool macStringToBytes(String macStr, uint8_t *mac)
 // =====================================================
 // LOAD PEER MAC จาก NVS
 // =====================================================
-
 void loadPeer()
 {
     prefs.begin("config", true);
@@ -108,7 +108,7 @@ void loadPeer()
 
     if (macStr == "")
     {
-        Serial.println("NO PEER");
+        Serial.println("NO PEER SAVED");
         return;
     }
 
@@ -121,11 +121,17 @@ void loadPeer()
         return;
     }
 
-    memcpy(peerInfo.peer_addr, peerMac, 6);
-    peerInfo.channel = 0;
+    memcpy(peerInfo.peer_addr, peerMac, 6);  
+    peerInfo.channel = 0; // ตามระบบเดิมของคุณ
     peerInfo.encrypt = false;
+    esp_now_del_peer(peerMac); 
 
-    if (esp_now_add_peer(&peerInfo) == ESP_OK)
+    esp_err_t result = esp_now_add_peer(&peerInfo);
+
+    Serial.print("ADD PEER RESULT: ");
+    Serial.println(esp_err_to_name(result));
+
+    if (result == ESP_OK)
     {
         Serial.println("PEER ADDED");
         peerReady = true;
@@ -133,13 +139,13 @@ void loadPeer()
     else
     {
         Serial.println("ADD PEER FAIL");
+        peerReady = false;
     }
 }
 
 // =====================================================
 // WEB HANDLERS
 // =====================================================
-
 void handleRoot()
 {
     if (!SPIFFS.exists("/index.html"))
@@ -178,56 +184,85 @@ void handleSave()
 
     if (!isValidMac(mac))
     {
-        server.send(200, "text/plain", "ERROR: Invalid MAC Format");
+        String errorHtml = "<html><meta charset='UTF-8'><body style='font-family:sans-serif; text-align:center; padding-top:50px;'>";
+        errorHtml += "<h2 style='color:red;'>ERROR: รูปแบบ MAC Address ไม่ถูกต้อง!</h2>";
+        errorHtml += "<p>กรุณากรอกในรูปแบบ XX:XX:XX:XX:XX:XX</p>";
+        errorHtml += "<br><a href='/' style='padding:10px 20px; background:#ccc; text-decoration:none; color:black; border-radius:5px;'>กลับไปแก้ไข</a>";
+        errorHtml += "</body></html>";
+        server.send(200, "text/html", errorHtml);
         return;
     }
 
     prefs.begin("config", false);
-    prefs.putString("peer", mac);
+    prefs.putString("peer", mac);      
     prefs.end();
 
     Serial.println("MAC SAVED: " + mac);
 
-    server.sendHeader("Location", "/");
-    server.send(302, "text/plain", "");
+    String successHtml = "<html><meta charset='UTF-8'><body style='font-family:sans-serif; text-align:center; padding-top:50px;'>";
+    successHtml += "<div style='display:inline-block; border:2px solid #4CAF50; padding:30px; border-radius:10px; background-color:#f9f9f9;'>";
+    successHtml += "<h2 style='color:#4CAF50;'>✓ บันทึกข้อมูลเรียบร้อยแล้ว!</h2>";
+    successHtml += "<p style='font-size:18px;'>บันทึกค่าใหม่เป็น: <b>" + mac + "</b> สำเร็จ</p>";
+    successHtml += "<p style='color:#666;'>กำลังเตรียมรีสตาร์ทบอร์ดเพื่อเข้าโหมดทำงานปกติ...</p>";
+    successHtml += "</div>";
+    successHtml += "</body></html>";
+
+    server.send(200, "text/html", successHtml);
+
+    delay(3000);   
+    ESP.restart();
 }
 
-void handleRestart()
+// =====================================================
+// ฟังก์ชันเริ่มรันระบบ WEB SERVER CONFIG (โหมดตั้งค่า)
+// =====================================================
+void startConfigMode()
 {
-    server.send(200, "text/plain", "RESTARTING");
-    delay(1000);
-    ESP.restart();
+    configMode = true;
+    Serial.println(">>> START CONFIG MODE (WEB SERVER Active) <<<");
+
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(AP_SSID, AP_PASSWORD);
+    delay(500);
+
+    Serial.print("AP IP Address: ");
+    Serial.println(WiFi.softAPIP());
+
+    server.on("/",        HTTP_GET,  handleRoot);
+    server.on("/save",    HTTP_POST, handleSave);
+    server.begin();
+
+    while (configMode)
+    {
+        server.handleClient();
+        delay(1);
+    }
 }
 
 // =====================================================
 // ESP-NOW SEND CALLBACK
 // =====================================================
-
-void OnDataSent(const uint8_t *mac_addr,
-                esp_now_send_status_t status)
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
 {
     if (status == ESP_NOW_SEND_SUCCESS)
     {
         Serial.println("OK");
-        digitalWrite(LED_wifi, HIGH);
+        digitalWrite(LED_wifi, HIGH); 
     }
     else
     {
         Serial.println("FAIL");
-        digitalWrite(LED_wifi, LOW);
+        digitalWrite(LED_wifi, LOW);  
     }
 }
 
 // =====================================================
 // ESP-NOW RECEIVE CALLBACK
 // =====================================================
-
-void OnDataRecv(const uint8_t *mac,
-                const uint8_t *incomingData,
-                int len)
+void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
 {
     String dataIn = "";
-
     for (int i = 0; i < len; i++)
         dataIn += (char)incomingData[i];
 
@@ -239,7 +274,6 @@ void OnDataRecv(const uint8_t *mac,
 // =====================================================
 // SETUP
 // =====================================================
-
 void setup()
 {
     Serial.begin(9600);
@@ -248,6 +282,7 @@ void setup()
     pinMode(LED_power, OUTPUT);
     pinMode(LED_wifi,  OUTPUT);
     pinMode(LED_RS,    OUTPUT);
+    pinMode(BUTTON_PIN, INPUT); 
 
     digitalWrite(LED_power, HIGH);
     digitalWrite(LED_wifi,  LOW);
@@ -256,21 +291,27 @@ void setup()
     if (!SPIFFS.begin(true))
         Serial.println("SPIFFS ERROR");
 
+    // ตรวจสอบข้อมูลจาก NVS Flash Memory
+    prefs.begin("config", true);
+    String macStr = prefs.getString("peer", "");
+    prefs.end();
+
+    // เงื่อนไข: ถ้ายังไม่มีการตั้งค่า MAC เลย ให้เปิดเข้าโหมด Config ทันที
+    if (macStr == "")
+    {
+        Serial.println("NO MASTER MAC");
+        startConfigMode();
+    }
+
+    // หากมีข้อมูลแล้ว จะรันในโหมดส่งข้อมูลปกติ
     WiFi.mode(WIFI_STA);
+    Serial.println("NORMAL GATEWAY MODE ACTIVE");
+    Serial.print("MY MAC: ");
     Serial.println(WiFi.macAddress());
-
-    WiFi.softAP(AP_SSID, AP_PASSWORD);
-    Serial.println("CONFIG MODE");
-    Serial.println(WiFi.softAPIP());
-
-    server.on("/",        HTTP_GET,  handleRoot);
-    server.on("/save",    HTTP_POST, handleSave);
-    server.on("/restart", HTTP_POST, handleRestart);
-    server.begin();
 
     if (esp_now_init() != ESP_OK)
     {
-        Serial.println("ESP NOW ERROR");
+        Serial.println("Error initializing ESP-NOW");
         return;
     }
 
@@ -279,11 +320,13 @@ void setup()
 
     loadPeer();
 
+    // สร้าง Task1 รันบน Core 0 (จัดการปุ่มกด และส่ง Serial)
     xTaskCreatePinnedToCore(
         Task1code, "Task1",
-        10000, NULL, 0, &Task1, 0);
+        10000, NULL, 0, &Task1, 0); 
     delay(500);
 
+    // สร้าง Task2 รันบน Core 1 (เปิดไว้สำหรับพัฒนาต่อตามระบบเดิม)
     xTaskCreatePinnedToCore(
         Task2code, "Task2",
         10000, NULL, 0, &Task2, 1);
@@ -291,42 +334,62 @@ void setup()
 }
 
 // =====================================================
-// TASK1 - Serial Relay -> ESP-NOW
+// TASK1 - Serial Relay -> ESP-NOW (Core 0)
 // =====================================================
-
 void Task1code(void * pvParameters)
-{
+{ 
     Serial.print("Task1 running on core ");
     Serial.println(xPortGetCoreID());
 
     for (;;)
     {
-        if (Serial1.available() > 0)
+        // ---- ระบบตรวจจับปุ่มกดเพื่อเข้าโหมดตั้งค่า ----
+        int reading = digitalRead(BUTTON_PIN);
+        if (reading != lastButtonState)
         {
-            digitalWrite(LED_RS, HIGH);
-
-            String msg = Serial1.readStringUntil('\r');
-
-            digitalWrite(LED_RS, LOW);
-
-            String data_send = "MB3L:" + msg + "\r\n";
-
-            if (peerReady)
-                esp_now_send(peerMac,
-                             (uint8_t*)data_send.c_str(),
-                             data_send.length());
-
-            delay(100);
+            lastDebounceTime = millis();
         }
 
-        server.handleClient();
+        if ((millis() - lastDebounceTime) > debounceDelay)
+        {
+            if (reading != buttonState)
+            {
+                buttonState = reading;
+                if (buttonState == HIGH) 
+                {
+                    Serial.println("ENTER CONFIG MODE");
+                    startConfigMode();
+                }
+            }
+        }
+        lastButtonState = reading;
+
+        // ---- ระบบอ่านค่าจาก Serial1 ดั้งเดิมของคุณ ----
+        if (Serial1.available() > 0)
+        {
+            digitalWrite(LED_RS, HIGH);   
+
+            // ใช้การตัดคำแบบเครื่องหมาย \r ตามระบบเดิม
+            String msg = Serial1.readStringUntil('\r');
+            
+            digitalWrite(LED_RS, LOW);    
+
+            String data_send = "MB3L:" + msg + "\r\n";
+            
+            if (peerReady)
+            {
+                esp_now_send(peerMac, (uint8_t*)data_send.c_str(), data_send.length());
+            }
+            delay(100);
+        }
+        
+        vTaskDelay(1 / portTICK_PERIOD_MS); // ป้องกัน Task แย่งทรัพยากรระบบ CPU
     }
 }
 
 // =====================================================
-// TASK2 - ว่างไว้สำหรับขยายในอนาคต
+// TASK2 - สแตนด์บายบน Core 1 (ตามโค้ดเดิม)
 // =====================================================
-
 void Task2code(void * pvParameters)
 {
     Serial.print("Task2 running on core ");
@@ -334,15 +397,14 @@ void Task2code(void * pvParameters)
 
     for (;;)
     {
-        delay(10);
+        vTaskDelay(10 / portTICK_PERIOD_MS);
     }
 }
 
 // =====================================================
-// LOOP
+// LOOP 
 // =====================================================
-
 void loop()
 {
-    delay(100);
-}
+    delay(100); 
+} 
