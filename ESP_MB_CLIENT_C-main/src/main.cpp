@@ -320,31 +320,39 @@ void setup()
 
     loadPeer();
 
-    // สร้าง Task1 รันบน Core 0 (จัดการปุ่มกด และส่ง Serial)
+    // Task ปุ่มกด (Priority สูง)
     xTaskCreatePinnedToCore(
-        Task1code, "Task1",
-        10000, NULL, 0, &Task1, 0); 
-    delay(500);
+        Task1code,
+        "Task1",
+        3000,
+        NULL,
+        3,
+        &Task1,
+        1);
 
-    // สร้าง Task2 รันบน Core 1 (เปิดไว้สำหรับพัฒนาต่อตามระบบเดิม)
+    // Task สื่อสาร
     xTaskCreatePinnedToCore(
-        Task2code, "Task2",
-        10000, NULL, 0, &Task2, 1);
-    delay(500);
+        Task2code,
+        "Task2",
+        10000,
+        NULL,
+        1,
+        &Task2,
+        1);
 }
 
 // =====================================================
-// TASK1 - Serial Relay -> ESP-NOW (Core 0)
+// Task ปุ่มกด
 // =====================================================
-void Task1code(void * pvParameters)
-{ 
-    Serial.print("Task1 running on core ");
+void Task1code(void *pvParameters)
+{
+    Serial.print("Task1 running on Core = ");
     Serial.println(xPortGetCoreID());
 
     for (;;)
     {
-        // ---- ระบบตรวจจับปุ่มกดเพื่อเข้าโหมดตั้งค่า ----
         int reading = digitalRead(BUTTON_PIN);
+
         if (reading != lastButtonState)
         {
             lastDebounceTime = millis();
@@ -355,55 +363,50 @@ void Task1code(void * pvParameters)
             if (reading != buttonState)
             {
                 buttonState = reading;
-                if (buttonState == HIGH) 
+
+                if (buttonState == HIGH)
                 {
                     Serial.println("ENTER CONFIG MODE");
                     startConfigMode();
                 }
             }
         }
+
         lastButtonState = reading;
 
-        // ---- ระบบอ่านค่าจาก Serial1 ดั้งเดิมของคุณ ----
-        if (Serial1.available() > 0)
-        {
-            digitalWrite(LED_RS, HIGH);   
-
-            // ใช้การตัดคำแบบเครื่องหมาย \r ตามระบบเดิม
-            String msg = Serial1.readStringUntil('\r');
-            
-            digitalWrite(LED_RS, LOW);    
-
-            String data_send = "MB3L:" + msg + "\r\n";
-            
-            if (peerReady)
-            {
-                esp_now_send(peerMac, (uint8_t*)data_send.c_str(), data_send.length());
-            }
-            delay(100);
-        }
-        
-        vTaskDelay(1 / portTICK_PERIOD_MS); // ป้องกัน Task แย่งทรัพยากรระบบ CPU
+        vTaskDelay(5 / portTICK_PERIOD_MS);
     }
 }
 
-// =====================================================
-// TASK2 - สแตนด์บายบน Core 1 (ตามโค้ดเดิม)
-// =====================================================
-void Task2code(void * pvParameters)
+void Task2code(void *pvParameters)
 {
-    Serial.print("Task2 running on core ");
+    Serial.print("Task2 running on core = ");
     Serial.println(xPortGetCoreID());
 
     for (;;)
     {
-        vTaskDelay(10 / portTICK_PERIOD_MS);
+        if (Serial1.available() > 0)
+        {
+            digitalWrite(LED_RS, HIGH);
+
+            String msg = Serial1.readStringUntil('\r');
+
+            digitalWrite(LED_RS, LOW);
+
+            String data_send = "MB3L:" + msg + "\r\n";
+
+            if (peerReady)
+            {
+                esp_now_send(peerMac,
+                             (uint8_t*)data_send.c_str(),
+                             data_send.length());
+            }
+        }
+
+        vTaskDelay(1 / portTICK_PERIOD_MS);
     }
 }
 
-// =====================================================
-// LOOP 
-// =====================================================
 void loop()
 {
     delay(100); 
