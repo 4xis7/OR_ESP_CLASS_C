@@ -271,80 +271,141 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
     Serial.flush();
 }
 
-// =====================================================
-// SETUP
-// =====================================================
 void setup()
 {
+    // =====================================================
+    // เริ่มต้น Serial สำหรับ Debug และ RS232 Communication
+    // =====================================================
     Serial.begin(9600);
     Serial1.begin(9600, SERIAL_8N1, RXD1, TXD1);
 
+    // =====================================================
+    // กำหนดทิศทางการทำงานของ GPIO
+    // LED_power : แสดงสถานะไฟเลี้ยงระบบ
+    // LED_wifi  : แสดงสถานะการส่งข้อมูล ESP-NOW
+    // LED_RS    : แสดงสถานะการรับส่งข้อมูล RS232
+    // BUTTON_PIN: ปุ่มกดสำหรับเข้าสู่โหมดตั้งค่า
+    // =====================================================
     pinMode(LED_power, OUTPUT);
-    pinMode(LED_wifi,  OUTPUT);
-    pinMode(LED_RS,    OUTPUT);
-    pinMode(BUTTON_PIN, INPUT); 
+    pinMode(LED_wifi, OUTPUT);
+    pinMode(LED_RS, OUTPUT);
+    pinMode(BUTTON_PIN, INPUT);
 
+    // =====================================================
+    // กำหนดสถานะเริ่มต้นของ LED
+    // =====================================================
     digitalWrite(LED_power, HIGH);
-    digitalWrite(LED_wifi,  LOW);
-    digitalWrite(LED_RS,    LOW);
+    digitalWrite(LED_wifi, LOW);
+    digitalWrite(LED_RS, LOW);
 
+    // =====================================================
+    // เปิดใช้งาน SPIFFS
+    // ใช้เก็บไฟล์หน้าเว็บสำหรับตั้งค่าระบบผ่าน Web Browser
+    // =====================================================
     if (!SPIFFS.begin(true))
         Serial.println("SPIFFS ERROR");
 
-    // ตรวจสอบข้อมูลจาก NVS Flash Memory
+    // =====================================================
+    // อ่าน MAC Address ของ Master ที่บันทึกไว้ใน NVS Flash
+    // เพื่อใช้ตรวจสอบว่ามีการตั้งค่าระบบแล้วหรือไม่
+    // =====================================================
     prefs.begin("config", true);
     String macStr = prefs.getString("peer", "");
     prefs.end();
 
-    // เงื่อนไข: ถ้ายังไม่มีการตั้งค่า MAC เลย ให้เปิดเข้าโหมด Config ทันที
+    // =====================================================
+    // เลือกโหมดการทำงานของอุปกรณ์
+    //
+    // กรณียังไม่มี MAC Address:
+    //  - เข้าโหมด Config Mode
+    //  - เปิด WiFi AP และ Web Server
+    //  - รอผู้ใช้กำหนดค่า Master MAC
+    //
+    // กรณีมี MAC Address แล้ว:
+    //  - เข้าโหมด Normal Mode
+    //  - เริ่มระบบ ESP-NOW สำหรับรับส่งข้อมูล
+    // =====================================================
     if (macStr == "")
     {
         Serial.println("NO MASTER MAC");
         startConfigMode();
     }
-
-    // หากมีข้อมูลแล้ว จะรันในโหมดส่งข้อมูลปกติ
-    WiFi.mode(WIFI_STA);
-    Serial.println("NORMAL GATEWAY MODE ACTIVE");
-    Serial.print("MY MAC: ");
-    Serial.println(WiFi.macAddress());
-
-    if (esp_now_init() != ESP_OK)
+    else
     {
-        Serial.println("Error initializing ESP-NOW");
-        return;
+        Serial.println("NORMAL GATEWAY MODE ACTIVE");
+
+        // =================================================
+        // ตั้งค่า ESP32 ให้ทำงานในโหมด Station
+        // เพื่อใช้งาน ESP-NOW
+        // =================================================
+        WiFi.mode(WIFI_STA);
+
+        Serial.print("MY MAC: ");
+        Serial.println(WiFi.macAddress());
+
+        // =================================================
+        // เริ่มต้นระบบ ESP-NOW
+        // หากเริ่มต้นไม่สำเร็จจะหยุดการทำงาน
+        // =================================================
+        if (esp_now_init() != ESP_OK)
+        {
+            Serial.println("Error initializing ESP-NOW");
+            return;
+        }
+
+        // =================================================
+        // ลงทะเบียน Callback Function
+        // สำหรับตรวจสอบผลการส่งและรับข้อมูล
+        // =================================================
+        esp_now_register_send_cb(OnDataSent);
+        esp_now_register_recv_cb(OnDataRecv);
+
+        // =================================================
+        // โหลด MAC Address ของ Peer จาก Flash Memory
+        // และเพิ่มเข้า Peer List ของ ESP-NOW
+        // =================================================
+        loadPeer();
+
+        // =================================================
+        // สร้าง Task1
+        // ทำหน้าที่ตรวจสอบปุ่มกดเพื่อเข้าสู่ Config Mode
+        // =================================================
+        xTaskCreatePinnedToCore(
+            Task1code,
+            "Task1",
+            3000,
+            NULL,
+            3,
+            &Task1,
+            1);
+
+        // =================================================
+        // สร้าง Task2
+        // ทำหน้าที่รับข้อมูลจาก RS232 และส่งต่อผ่าน ESP-NOW
+        // =================================================
+        xTaskCreatePinnedToCore(
+            Task2code,
+            "Task2",
+            8192,
+            NULL,
+            1,
+            &Task2,
+            1);
     }
-
-    esp_now_register_send_cb(OnDataSent);
-    esp_now_register_recv_cb(OnDataRecv);
-
-    loadPeer();
-
-    // สร้าง Task1 รันบน Core 0 (จัดการปุ่มกด และส่ง Serial)
-    xTaskCreatePinnedToCore(
-        Task1code, "Task1",
-        10000, NULL, 0, &Task1, 0); 
-    delay(500);
-
-    // สร้าง Task2 รันบน Core 1 (เปิดไว้สำหรับพัฒนาต่อตามระบบเดิม)
-    xTaskCreatePinnedToCore(
-        Task2code, "Task2",
-        10000, NULL, 0, &Task2, 1);
-    delay(500);
 }
 
 // =====================================================
-// TASK1 - Serial Relay -> ESP-NOW (Core 0)
+// Task ปุ่มกด
 // =====================================================
-void Task1code(void * pvParameters)
-{ 
-    Serial.print("Task1 running on core ");
+void Task1code(void *pvParameters)
+{
+    Serial.print("Task1 running on Core = ");
     Serial.println(xPortGetCoreID());
 
     for (;;)
     {
-        // ---- ระบบตรวจจับปุ่มกดเพื่อเข้าโหมดตั้งค่า ----
         int reading = digitalRead(BUTTON_PIN);
+
         if (reading != lastButtonState)
         {
             lastDebounceTime = millis();
@@ -355,55 +416,50 @@ void Task1code(void * pvParameters)
             if (reading != buttonState)
             {
                 buttonState = reading;
-                if (buttonState == HIGH) 
+
+                if (buttonState == HIGH)
                 {
                     Serial.println("ENTER CONFIG MODE");
                     startConfigMode();
                 }
             }
         }
+
         lastButtonState = reading;
 
-        // ---- ระบบอ่านค่าจาก Serial1 ดั้งเดิมของคุณ ----
-        if (Serial1.available() > 0)
-        {
-            digitalWrite(LED_RS, HIGH);   
-
-            // ใช้การตัดคำแบบเครื่องหมาย \r ตามระบบเดิม
-            String msg = Serial1.readStringUntil('\r');
-            
-            digitalWrite(LED_RS, LOW);    
-
-            String data_send = "MB3L:" + msg + "\r\n";
-            
-            if (peerReady)
-            {
-                esp_now_send(peerMac, (uint8_t*)data_send.c_str(), data_send.length());
-            }
-            delay(100);
-        }
-        
-        vTaskDelay(1 / portTICK_PERIOD_MS); // ป้องกัน Task แย่งทรัพยากรระบบ CPU
+        vTaskDelay(5 / portTICK_PERIOD_MS);
     }
 }
 
-// =====================================================
-// TASK2 - สแตนด์บายบน Core 1 (ตามโค้ดเดิม)
-// =====================================================
-void Task2code(void * pvParameters)
+void Task2code(void *pvParameters)
 {
-    Serial.print("Task2 running on core ");
+    Serial.print("Task2 running on core = ");
     Serial.println(xPortGetCoreID());
 
     for (;;)
     {
-        vTaskDelay(10 / portTICK_PERIOD_MS);
+        if (Serial1.available() > 0)
+        {
+            digitalWrite(LED_RS, HIGH);
+
+            String msg = Serial1.readStringUntil('\r');
+
+            digitalWrite(LED_RS, LOW);
+
+            String data_send = "MB3L:" + msg + "\r\n";
+
+            if (peerReady)
+            {
+                esp_now_send(peerMac,
+                             (uint8_t*)data_send.c_str(),
+                             data_send.length());
+            }
+        }
+
+        vTaskDelay(1 / portTICK_PERIOD_MS);
     }
 }
 
-// =====================================================
-// LOOP 
-// =====================================================
 void loop()
 {
     delay(100); 
